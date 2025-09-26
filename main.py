@@ -603,7 +603,7 @@ class MuseTalkInference:
                         face_std = processed_face.std()
                         
                         # Fallback: Use simple lip sync only if output is truly invalid
-                        if face_mean < 50 or face_mean > 200 or face_std < 10:
+                        if face_mean < 50 or face_mean > 200 or face_std < 5:
                             print(f"⚠️ Model output invalid (mean:{face_mean:.1f}, std:{face_std:.1f}), using fallback")
                             processed_face = self.simple_lip_sync_fallback(face_crop, audio_feat.cpu().numpy(), frame_idx)
                             processed_face = cv2.resize(processed_face, original_face_size)
