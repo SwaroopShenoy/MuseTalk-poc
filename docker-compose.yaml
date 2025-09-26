@@ -1,0 +1,49 @@
+services:
+  musetalk-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: musetalk-api
+    ports:
+      - "5000:5000"
+    volumes:
+      - ./input:/app/input
+      - ./output:/app/output
+      - ./checkpoints:/app/checkpoints
+      - musetalk_cache:/app/checkpoints/torch_cache
+      - huggingface_cache:/app/checkpoints/huggingface_cache
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - TORCH_CUDA_ARCH_LIST=6.0 6.1 7.0 7.5 8.0 8.6+PTX
+      - PYTHONUNBUFFERED=1
+      - TORCH_HOME=/app/checkpoints/torch_cache
+      - HF_HOME=/app/checkpoints/huggingface_cache
+      - CUDA_VISIBLE_DEVICES=0
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu, compute, utility]
+        limits:
+          memory: 24G  # Increased for MuseTalk
+          cpus: '8'
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      interval: 300s
+      timeout: 30s
+      retries: 3
+      start_period: 600s  # Increased startup time for model downloads
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "100m"
+        max-file: "3"
+
+volumes:
+  musetalk_cache:
+    driver: local
+  huggingface_cache:
+    driver: local
