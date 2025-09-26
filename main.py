@@ -52,23 +52,38 @@ def download_musetalk_models():
     models_dir = "/app/checkpoints/MuseTalk"
     os.makedirs(models_dir, exist_ok=True)
     
-    # Essential model files only
+    # Essential model files with better URLs
     model_files = {
-        # MuseTalk main model weights
-        "musetalk/pytorch_model.bin": "https://huggingface.co/TMElyralab/MuseTalk/resolve/main/musetalk/pytorch_model.bin",
-        "musetalk/musetalk.json": "https://huggingface.co/TMElyralab/MuseTalk/resolve/main/musetalk/musetalk.json",
+        # MuseTalk main model weights - try multiple sources
+        "musetalk/pytorch_model.bin": [
+            "https://huggingface.co/TMElyralab/MuseTalk/resolve/main/musetalk/pytorch_model.bin",
+            "https://huggingface.co/camenduru/MuseTalk/resolve/main/musetalk/pytorch_model.bin"
+        ],
+        "musetalk/musetalk.json": [
+            "https://huggingface.co/TMElyralab/MuseTalk/resolve/main/musetalk/musetalk.json",
+            "https://huggingface.co/camenduru/MuseTalk/resolve/main/musetalk/musetalk.json"
+        ],
         
-        # VAE model (stable diffusion VAE) - REQUIRED
-        "sd-vae-ft-mse/diffusion_pytorch_model.bin": "https://huggingface.co/stabilityai/sd-vae-ft-mse/resolve/main/diffusion_pytorch_model.bin",
-        "sd-vae-ft-mse/config.json": "https://huggingface.co/stabilityai/sd-vae-ft-mse/resolve/main/config.json",
+        # VAE model with safetensors preference
+        "sd-vae-ft-mse/diffusion_pytorch_model.safetensors": [
+            "https://huggingface.co/stabilityai/sd-vae-ft-mse/resolve/main/diffusion_pytorch_model.safetensors"
+        ],
+        "sd-vae-ft-mse/diffusion_pytorch_model.bin": [
+            "https://huggingface.co/stabilityai/sd-vae-ft-mse/resolve/main/diffusion_pytorch_model.bin"
+        ],
+        "sd-vae-ft-mse/config.json": [
+            "https://huggingface.co/stabilityai/sd-vae-ft-mse/resolve/main/config.json"
+        ],
         
-        # Whisper model for audio encoding
-        "whisper/tiny.pt": "https://huggingface.co/openai/whisper-tiny/resolve/main/pytorch_model.bin",
+        # Whisper model
+        "whisper/tiny.pt": [
+            "https://huggingface.co/openai/whisper-tiny/resolve/main/pytorch_model.bin"
+        ],
     }
     
     success_count = 0
     
-    for filename, url in model_files.items():
+    for filename, urls in model_files.items():
         file_path = os.path.join(models_dir, filename)
         
         # Create directory if needed
@@ -84,37 +99,58 @@ def download_musetalk_models():
                 print(f"⚠️ {filename} too small, re-downloading...")
                 os.remove(file_path)
         
-        try:
-            print(f"📥 Downloading {filename}...")
-            response = requests.get(url, stream=True, timeout=300, 
-                                  headers={'User-Agent': 'MuseTalk-API/1.0'})
-            response.raise_for_status()
-            
-            total_size = int(response.headers.get('content-length', 0))
-            downloaded = 0
-            
-            with open(file_path, 'wb') as f:
-                for chunk in response.iter_content(chunk_size=8192):
-                    if chunk:
-                        f.write(chunk)
-                        downloaded += len(chunk)
-                        if total_size > 0 and downloaded % (10 * 1024 * 1024) == 0:
-                            progress = (downloaded / total_size) * 100
-                            print(f"  Progress: {progress:.1f}%")
-            
-            file_size = os.path.getsize(file_path)
-            print(f"✅ Downloaded {filename} ({file_size / 1024 / 1024:.1f}MB)")
-            success_count += 1
-            
-        except Exception as e:
-            print(f"❌ Failed to download {filename}: {e}")
-            if os.path.exists(file_path):
-                os.remove(file_path)
+        # Try multiple URLs
+        downloaded = False
+        for url in urls:
+            try:
+                print(f"📥 Downloading {filename} from {url.split('/')[-3]}...")
+                response = requests.get(url, stream=True, timeout=300, 
+                                      headers={'User-Agent': 'MuseTalk-API/1.0'})
+                response.raise_for_status()
+                
+                total_size = int(response.headers.get('content-length', 0))
+                downloaded_bytes = 0
+                
+                with open(file_path, 'wb') as f:
+                    for chunk in response.iter_content(chunk_size=8192):
+                        if chunk:
+                            f.write(chunk)
+                            downloaded_bytes += len(chunk)
+                            if total_size > 0 and downloaded_bytes % (10 * 1024 * 1024) == 0:
+                                progress = (downloaded_bytes / total_size) * 100
+                                print(f"  Progress: {progress:.1f}%")
+                
+                file_size = os.path.getsize(file_path)
+                print(f"✅ Downloaded {filename} ({file_size / 1024 / 1024:.1f}MB)")
+                success_count += 1
+                downloaded = True
+                break
+                
+            except Exception as e:
+                print(f"❌ Failed to download {filename} from {url.split('/')[-3]}: {e}")
+                if os.path.exists(file_path):
+                    os.remove(file_path)
+                continue
+        
+        if not downloaded:
+            print(f"❌ Failed to download {filename} from all sources")
     
-    # Minimum required: VAE and MuseTalk model
-    required_files = ["sd-vae-ft-mse/config.json", "sd-vae-ft-mse/diffusion_pytorch_model.bin", 
-                     "musetalk/pytorch_model.bin"]
-    required_exists = sum(1 for f in required_files if os.path.exists(os.path.join(models_dir, f)))
+    # Check for minimum required files
+    required_files = [
+        "sd-vae-ft-mse/config.json", 
+        ["sd-vae-ft-mse/diffusion_pytorch_model.safetensors", "sd-vae-ft-mse/diffusion_pytorch_model.bin"],  # Either format
+        "musetalk/pytorch_model.bin"
+    ]
+    
+    required_exists = 0
+    for req in required_files:
+        if isinstance(req, list):
+            # Check if any of the alternatives exist
+            if any(os.path.exists(os.path.join(models_dir, f)) for f in req):
+                required_exists += 1
+        else:
+            if os.path.exists(os.path.join(models_dir, req)):
+                required_exists += 1
     
     return required_exists >= len(required_files)
 
@@ -167,13 +203,28 @@ class MuseTalkInference:
             else:
                 raise Exception("VAE model not found")
             
-            # Load MuseTalk UNet
+            # Load MuseTalk UNet - FIXED for correct input channels
             musetalk_path = self.model_dir / "musetalk" / "pytorch_model.bin"
             if musetalk_path.exists():
-                # UNet configuration for MuseTalk
+                # First, inspect the checkpoint to determine correct configuration
+                checkpoint = torch.load(musetalk_path, map_location='cpu')
+                if isinstance(checkpoint, dict) and 'state_dict' in checkpoint:
+                    checkpoint = checkpoint['state_dict']
+                
+                # Check conv_in weight shape to determine input channels
+                conv_in_weight = None
+                for key in checkpoint.keys():
+                    if 'conv_in.weight' in key:
+                        conv_in_weight = checkpoint[key]
+                        break
+                
+                input_channels = 8 if conv_in_weight is not None and conv_in_weight.shape[1] == 8 else 4
+                print(f"🔍 Detected MuseTalk input channels: {input_channels}")
+                
+                # UNet configuration for MuseTalk - FIXED
                 unet_config = {
                     "sample_size": 32,  # 256/8 for VAE latent space
-                    "in_channels": 4,   # VAE latent channels
+                    "in_channels": input_channels,   # Detected from checkpoint
                     "out_channels": 4,
                     "layers_per_block": 2,
                     "block_out_channels": [320, 640, 1280, 1280],
@@ -195,21 +246,26 @@ class MuseTalkInference:
                 
                 try:
                     self.unet = UNet2DConditionModel(**unet_config)
-                    # Load MuseTalk weights
-                    checkpoint = torch.load(musetalk_path, map_location=self.device)
-                    if isinstance(checkpoint, dict) and 'state_dict' in checkpoint:
-                        checkpoint = checkpoint['state_dict']
-                    self.unet.load_state_dict(checkpoint, strict=False)
+                    # Load MuseTalk weights with proper error handling
+                    missing_keys, unexpected_keys = self.unet.load_state_dict(checkpoint, strict=False)
+                    if missing_keys:
+                        print(f"⚠️ Missing keys: {len(missing_keys)} (this might be normal)")
+                    if unexpected_keys:
+                        print(f"⚠️ Unexpected keys: {len(unexpected_keys)} (this might be normal)")
+                    
                     self.unet = self.unet.to(self.device).half()
                     self.unet.eval()
-                    print("✅ MuseTalk UNet loaded")
+                    self.input_channels = input_channels
+                    print("✅ MuseTalk UNet loaded with correct input channels")
                 except Exception as e:
-                    print(f"⚠️ UNet load warning: {e}")
-                    # Fallback UNet
+                    print(f"❌ UNet load failed: {e}")
+                    # Try with 4 channels as fallback
+                    unet_config["in_channels"] = 4
                     self.unet = UNet2DConditionModel(**unet_config)
                     self.unet = self.unet.to(self.device).half()
                     self.unet.eval()
-                    print("⚠️ Using default UNet")
+                    self.input_channels = 4
+                    print("⚠️ Using default UNet (4 channels)")
             else:
                 raise Exception("MuseTalk model not found")
             
@@ -496,7 +552,7 @@ class MuseTalkInference:
                     batch_faces = batch_face_tensors[0]
                     batch_audio = batch_audio_feats[0]
                 
-                # Run inference - single-step inpainting
+                # Run inference - single-step inpainting with correct input handling
                 with torch.no_grad():
                     # Encode to latent space
                     face_latents = self.vae.encode(batch_faces.half()).latent_dist.sample()
@@ -510,11 +566,19 @@ class MuseTalkInference:
                     
                     masked_latents = face_latents * (1 - mask_latent)
                     
+                    # Prepare UNet input based on detected input channels
+                    if hasattr(self, 'input_channels') and self.input_channels == 8:
+                        # For 8-channel input: concatenate latents and mask
+                        unet_input = torch.cat([masked_latents, mask_latent], dim=1)
+                    else:
+                        # For 4-channel input: use masked latents only
+                        unet_input = masked_latents
+                    
                     # Single-step UNet (timestep=0)
                     timesteps = torch.zeros(batch_size_actual, dtype=torch.long, device=self.device)
                     
                     noise_pred = self.unet(
-                        masked_latents,
+                        unet_input,
                         timesteps,
                         encoder_hidden_states=batch_audio,
                         return_dict=False
