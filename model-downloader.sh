@@ -57,7 +57,7 @@ download_if_needed \
     "https://huggingface.co/TMElyralab/MuseTalk/resolve/main/musetalk/pytorch_model.bin" \
     "./checkpoints/MuseTalk/musetalk/pytorch_model.bin" \
     "MuseTalk main model (pytorch_model.bin)" \
-    3209600
+    2709600
 
 # Download MuseTalk config (small file, min 1KB)
 download_if_needed \
