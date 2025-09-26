@@ -488,11 +488,20 @@ class MuseTalkInference:
         """Decode latent output back to image with proper dtype handling"""
         try:
             with torch.no_grad():
+                # Debug: Check input shape to VAE decoder
+                print(f"🔍 Latent output shape for VAE decoder: {latent_output.shape}")
+                
                 # Ensure latent_output is half precision for VAE decoder
                 latent_output = latent_output.half()
                 
-                # Decode from latent space
+                # The latent should be 4-channel [B, 4, H, W] for VAE decoder
+                if latent_output.shape[1] != 4:
+                    raise ValueError(f"VAE decoder expects 4-channel latent input, got {latent_output.shape[1]} channels")
+                
+                # Decode from latent space to RGB image
                 decoded_image = self.vae.decode(latent_output).sample
+                
+                print(f"🔍 Decoded image shape from VAE: {decoded_image.shape}")
                 
                 # Denormalize from [-1, 1] to [0, 1]
                 decoded_image = (decoded_image / 2 + 0.5).clamp(0, 1)
@@ -523,7 +532,9 @@ class MuseTalkInference:
                 return output_bgr
         
         except Exception as e:
-            print(f"Postprocessing error: {e}")
+            print(f"Postprocessing error details: {e}")
+            print(f"Input shape was: {latent_output.shape if 'latent_output' in locals() else 'undefined'}")
+            print(f"Input dtype was: {latent_output.dtype if 'latent_output' in locals() else 'undefined'}")
             raise e
     
     def inference(self, video_path, audio_path, output_path):
@@ -661,20 +672,27 @@ class MuseTalkInference:
                     # Apply inpainting - ensure all tensors are half precision
                     inpainted_latents = face_latents * (1 - mask_latent) + noise_pred * mask_latent
                     
-                    # Decode back to image
-                    decoded_faces = self.vae.decode(inpainted_latents).sample
-                    decoded_faces = (decoded_faces / 2 + 0.5).clamp(0, 1)
+                    print(f"🔍 Final inpainted latents shape: {inpainted_latents.shape}")
+                    
+                    # NOTE: inpainted_latents is [B, 4, 32, 32] - this goes to VAE decoder
+                    # We do NOT decode here - we decode per frame in postprocessing
                 
-                # Process results
+                # Process results with detailed debugging
                 for j in range(len(batch_frames)):
                     frame = batch_frames[j]
                     original_face_size = batch_original_sizes[j]
                     
-                    # Extract single face
+                    # Extract single face from batch
                     if len(batch_frames) > 1:
-                        single_face = decoded_faces[j:j+1]
+                        single_face = inpainted_latents[j:j+1]
+                        print(f"🔍 Single face latent shape (batch mode): {single_face.shape}")
                     else:
-                        single_face = decoded_faces
+                        single_face = inpainted_latents
+                        print(f"🔍 Single face latent shape (single mode): {single_face.shape}")
+                    
+                    # This should be [1, 4, 32, 32] for VAE decoder
+                    if single_face.shape[1] != 4:
+                        print(f"❌ WARNING: Expected 4-channel latent for VAE decoder, got {single_face.shape[1]}")
                     
                     processed_face = self.postprocess_output(single_face, original_face_size)
                     
