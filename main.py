@@ -370,7 +370,7 @@ class MuseTalkInference:
         return [cx - size//2, cy - size//2, cx + size//2, cy + size//2]
     
     def extract_audio_features(self, audio_path):
-        """Extract audio features using Whisper"""
+        """Extract audio features using Whisper with proper dtype handling"""
         try:
             # Load audio
             audio = whisper.load_audio(audio_path)
@@ -380,8 +380,10 @@ class MuseTalkInference:
             mel = whisper.log_mel_spectrogram(audio).to(self.device)
             
             with torch.no_grad():
-                # Use encoder to extract features
+                # Use encoder to extract features - ensure half precision output
                 audio_features = self.whisper_model.encoder(mel.unsqueeze(0))
+                # Convert to half precision to match UNet expectations
+                audio_features = audio_features.half()
             
             return audio_features
         
@@ -419,10 +421,11 @@ class MuseTalkInference:
         # Normalize to [-1, 1] for VAE
         face_normalized = (face_rgb - 0.5) / 0.5
         
-        # Convert to tensor
+        # Convert to tensor with correct dtype
         face_tensor = torch.from_numpy(face_normalized.transpose(2, 0, 1)).unsqueeze(0)
         
-        return face_tensor.to(self.device)
+        # Ensure float16 consistency with VAE
+        return face_tensor.to(self.device).half()
     
     def create_mouth_mask(self, face_shape=(256, 256)):
         """Create mask for mouth region"""
@@ -446,17 +449,24 @@ class MuseTalkInference:
         # Gaussian smoothing
         mask = cv2.GaussianBlur(mask, (15, 15), 5)
         
-        return torch.from_numpy(mask).unsqueeze(0).unsqueeze(0).to(self.device)
+        # Return as half precision tensor to match model
+        return torch.from_numpy(mask).unsqueeze(0).unsqueeze(0).to(self.device).half()
     
     def postprocess_output(self, latent_output, original_size):
-        """Decode latent output back to image"""
+        """Decode latent output back to image with proper dtype handling"""
         try:
             with torch.no_grad():
+                # Ensure latent_output is half precision for VAE decoder
+                latent_output = latent_output.half()
+                
                 # Decode from latent space
                 decoded_image = self.vae.decode(latent_output).sample
                 
-                # Denormalize
+                # Denormalize from [-1, 1] to [0, 1]
                 decoded_image = (decoded_image / 2 + 0.5).clamp(0, 1)
+                
+                # Convert to float32 for numpy operations
+                decoded_image = decoded_image.float()
                 
                 # Convert to numpy
                 output_np = decoded_image.cpu().numpy()
@@ -552,39 +562,43 @@ class MuseTalkInference:
                     batch_faces = batch_face_tensors[0]
                     batch_audio = batch_audio_feats[0]
                 
-                # Run inference - single-step inpainting with correct input handling
+                # Run inference - single-step inpainting with dtype consistency
                 with torch.no_grad():
-                    # Encode to latent space
+                    # Encode to latent space - ensure half precision
                     face_latents = self.vae.encode(batch_faces.half()).latent_dist.sample()
                     face_latents = face_latents * self.vae.config.scaling_factor
+                    face_latents = face_latents.half()  # Ensure half precision
                     
                     # Create masked latents
                     batch_size_actual = face_latents.shape[0]
                     mask_latent = self.create_mouth_mask()
                     mask_latent = nn.functional.interpolate(mask_latent, size=(32, 32), mode='bilinear')
-                    mask_latent = mask_latent.repeat(batch_size_actual, 1, 1, 1)
+                    mask_latent = mask_latent.repeat(batch_size_actual, 1, 1, 1).half()  # Ensure half precision
                     
                     masked_latents = face_latents * (1 - mask_latent)
                     
-                    # Prepare UNet input based on detected input channels
+                    # Prepare UNet input based on detected input channels with dtype consistency
                     if hasattr(self, 'input_channels') and self.input_channels == 8:
                         # For 8-channel input: concatenate latents and mask
-                        unet_input = torch.cat([masked_latents, mask_latent], dim=1)
+                        unet_input = torch.cat([masked_latents, mask_latent], dim=1).half()
                     else:
                         # For 4-channel input: use masked latents only
-                        unet_input = masked_latents
+                        unet_input = masked_latents.half()
                     
-                    # Single-step UNet (timestep=0)
+                    # Single-step UNet (timestep=0) - ensure correct dtypes
                     timesteps = torch.zeros(batch_size_actual, dtype=torch.long, device=self.device)
+                    
+                    # Ensure audio features are half precision
+                    batch_audio_half = batch_audio.half()
                     
                     noise_pred = self.unet(
                         unet_input,
                         timesteps,
-                        encoder_hidden_states=batch_audio,
+                        encoder_hidden_states=batch_audio_half,
                         return_dict=False
                     )[0]
                     
-                    # Apply inpainting
+                    # Apply inpainting - ensure all tensors are half precision
                     inpainted_latents = face_latents * (1 - mask_latent) + noise_pred * mask_latent
                     
                     # Decode back to image
