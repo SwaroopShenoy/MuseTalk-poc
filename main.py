@@ -38,11 +38,13 @@ def get_optimal_batch_size():
     """Calculate optimal batch size based on available GPU/CPU memory"""
     if torch.cuda.is_available():
         gpu_memory = torch.cuda.get_device_properties(0).total_memory
-        # RTX 3090 has 24GB VRAM - optimize for this
+        # RTX 3090 has 24GB VRAM - be much more aggressive
         if gpu_memory > 20 * 1024 * 1024 * 1024:  # 20GB+
-            return 6  # Aggressive batching for RTX 3090
+            return 32  # Very aggressive batching for RTX 3090
         elif gpu_memory > 16 * 1024 * 1024 * 1024:  # 16GB+
-            return 4
+            return 16
+        elif gpu_memory > 12 * 1024 * 1024 * 1024:  # 12GB+
+            return 8
         else:
             return max(1, min(4, int(gpu_memory * 0.3 / (512 * 1024 * 1024))))
     else:
@@ -554,9 +556,19 @@ class MuseTalkInference:
             num_audio_frames = audio_features.shape[1]
             audio_per_frame = num_audio_frames / len(frames) if len(frames) > 0 else 1
             
+            print(f"Using batch size: {self.batch_size}")
+            if torch.cuda.is_available():
+                print(f"GPU memory: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f}GB total")
+            
             for i in range(0, len(frames), self.batch_size):
                 batch_frames = frames[i:i + self.batch_size]
                 batch_results = []
+                
+                # Monitor GPU memory usage
+                if torch.cuda.is_available():
+                    memory_allocated = torch.cuda.memory_allocated(0) / 1024**3
+                    memory_cached = torch.cuda.memory_reserved(0) / 1024**3
+                    print(f"GPU Memory: {memory_allocated:.1f}GB allocated, {memory_cached:.1f}GB cached")
                 
                 for j, frame in enumerate(batch_frames):
                     frame_idx = i + j
@@ -586,11 +598,17 @@ class MuseTalkInference:
                         # Debug: Check processed face
                         print(f"Processed face shape: {processed_face.shape}, range: [{processed_face.min()}, {processed_face.max()}]")
                         
-                        # Fallback: If model output looks wrong, use simple lip sync
-                        if processed_face.mean() < 10 or processed_face.std() < 5:
-                            print("⚠️ Model output appears invalid, using simple fallback lip sync")
+                        # Check if model output is reasonable (values should be in 0-255 range with good contrast)
+                        face_mean = processed_face.mean()
+                        face_std = processed_face.std()
+                        
+                        # Fallback: Use simple lip sync only if output is truly invalid
+                        if face_mean < 50 or face_mean > 200 or face_std < 10:
+                            print(f"⚠️ Model output invalid (mean:{face_mean:.1f}, std:{face_std:.1f}), using fallback")
                             processed_face = self.simple_lip_sync_fallback(face_crop, audio_feat.cpu().numpy(), frame_idx)
                             processed_face = cv2.resize(processed_face, original_face_size)
+                        else:
+                            print(f"✅ Using model output (mean:{face_mean:.1f}, std:{face_std:.1f})")
                     
                     # Replace face in original frame
                     result_frame = frame.copy()
