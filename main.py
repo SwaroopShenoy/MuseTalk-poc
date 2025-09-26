@@ -59,7 +59,7 @@ def download_musetalk_models():
     # Correct model files based on actual MuseTalk repository structure
     model_files = {
         # MuseTalk main model weights
-        "MuseTalk/pytorch_model.bin": "https://huggingface.co/TMElyralab/MuseTalk/resolve/main/pytorch_model.bin",
+        "MuseTalk/pytorch_model.bin": "https://huggingface.co/TMElyralab/MuseTalk/resolve/main/musetalk/pytorch_model.bin", #"https://huggingface.co/TMElyralab/MuseTalk/resolve/main/pytorch_model.bin",
         
         # VAE model (stable diffusion VAE)
         "sd-vae-ft-mse/diffusion_pytorch_model.bin": "https://huggingface.co/stabilityai/sd-vae-ft-mse/resolve/main/diffusion_pytorch_model.bin",
