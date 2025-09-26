@@ -428,7 +428,7 @@ class MuseTalkInference:
         return face_tensor.to(self.device).half()
     
     def create_mouth_mask(self, face_shape=(256, 256)):
-        """Create mask for mouth region"""
+        """Create mask for mouth region - returns 4-channel mask for 8-channel UNet"""
         mask = np.zeros(face_shape, dtype=np.float32)
         
         # Define mouth region
@@ -449,8 +449,13 @@ class MuseTalkInference:
         # Gaussian smoothing
         mask = cv2.GaussianBlur(mask, (15, 15), 5)
         
-        # Return as half precision tensor to match model
-        return torch.from_numpy(mask).unsqueeze(0).unsqueeze(0).to(self.device).half()
+        # Convert to tensor and create 4-channel mask (to match VAE latent channels)
+        mask_tensor = torch.from_numpy(mask).to(self.device).half()
+        
+        # Expand to 4 channels: [1, 4, H, W] to match latent space
+        mask_4ch = mask_tensor.unsqueeze(0).repeat(4, 1, 1).unsqueeze(0)
+        
+        return mask_4ch
     
     def postprocess_output(self, latent_output, original_size):
         """Decode latent output back to image with proper dtype handling"""
@@ -562,7 +567,7 @@ class MuseTalkInference:
                     batch_faces = batch_face_tensors[0]
                     batch_audio = batch_audio_feats[0]
                 
-                # Run inference - single-step inpainting with dtype consistency
+                # Run inference - single-step inpainting with correct channel handling
                 with torch.no_grad():
                     # Encode to latent space - ensure half precision
                     face_latents = self.vae.encode(batch_faces.half()).latent_dist.sample()
@@ -577,13 +582,16 @@ class MuseTalkInference:
                     
                     masked_latents = face_latents * (1 - mask_latent)
                     
-                    # Prepare UNet input based on detected input channels with dtype consistency
+                    # Prepare UNet input based on detected input channels with correct concatenation
                     if hasattr(self, 'input_channels') and self.input_channels == 8:
-                        # For 8-channel input: concatenate latents and mask
-                        unet_input = torch.cat([masked_latents, mask_latent], dim=1).half()
+                        # For 8-channel input: concatenate [face_latents, mask_latent] = [4, 4] = 8 channels
+                        # NOT [masked_latents, mask_latent] which would be [4, 1] = 5 channels
+                        unet_input = torch.cat([face_latents, mask_latent], dim=1).half()
+                        print(f"🔍 UNet input shape: {unet_input.shape} (8-channel mode)")
                     else:
                         # For 4-channel input: use masked latents only
                         unet_input = masked_latents.half()
+                        print(f"🔍 UNet input shape: {unet_input.shape} (4-channel mode)")
                     
                     # Single-step UNet (timestep=0) - ensure correct dtypes
                     timesteps = torch.zeros(batch_size_actual, dtype=torch.long, device=self.device)
