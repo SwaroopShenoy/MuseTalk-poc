@@ -24,6 +24,14 @@ import queue
 
 warnings.filterwarnings("ignore")
 
+# Import whisper at module level
+try:
+    import whisper
+    WHISPER_AVAILABLE = True
+except ImportError:
+    WHISPER_AVAILABLE = False
+    print("Warning: whisper not available, using fallback audio processing")
+
 app = Flask(__name__)
 
 def get_optimal_batch_size():
@@ -141,9 +149,11 @@ class MuseTalkInference:
             
             # Load whisper model for audio processing
             try:
-                import whisper
-                self.whisper_model = whisper.load_model("tiny", device=self.device)
-                print("✅ Whisper model loaded")
+                if WHISPER_AVAILABLE:
+                    self.whisper_model = whisper.load_model("tiny", device=self.device)
+                    print("✅ Whisper model loaded")
+                else:
+                    raise ImportError("Whisper not available")
             except Exception as e:
                 print(f"⚠️ Whisper load error: {e}")
                 # Create a dummy whisper model
@@ -213,25 +223,35 @@ class MuseTalkInference:
                     nn.Linear(256 * 8 * 8, 512)
                 )
                 
+                # Improved decoder with skip connections
                 self.decoder = nn.Sequential(
                     nn.Linear(768, 2048),
                     nn.ReLU(),
                     nn.Dropout(0.1),
                     nn.Linear(2048, 4096),
                     nn.ReLU(),
-                    nn.Linear(4096, 3 * face_dim * face_dim),
-                    nn.Sigmoid()
+                    nn.Linear(4096, 8192),
+                    nn.ReLU(),
+                    nn.Linear(8192, 3 * face_dim * face_dim),
+                )
+                
+                # Add a residual connection pathway
+                self.face_bypass = nn.Sequential(
+                    nn.AdaptiveAvgPool2d(face_dim),
+                    nn.Conv2d(3, 3, 1)
                 )
                 
             def forward(self, audio_feat, face_img):
                 # Handle batch dimensions
                 batch_size = face_img.shape[0]
                 
+                # Store original face for residual connection
+                original_face = self.face_bypass(face_img)
+                
                 # Encode audio
                 if audio_feat.dim() == 3:
-                    audio_feat = audio_feat.squeeze(1)  # Remove sequence dim if present
+                    audio_feat = audio_feat.squeeze(1)
                 if audio_feat.shape[-1] != 384:
-                    # Pad or truncate to expected size
                     if audio_feat.shape[-1] > 384:
                         audio_feat = audio_feat[..., :384]
                     else:
@@ -245,8 +265,13 @@ class MuseTalkInference:
                 
                 # Combine and decode
                 combined = torch.cat([audio_emb, face_emb], dim=1)
-                output = self.decoder(combined)
-                return output.view(batch_size, 3, 256, 256)
+                decoded = self.decoder(combined)
+                decoded = decoded.view(batch_size, 3, 256, 256)
+                
+                # Apply residual connection and normalization
+                output = torch.sigmoid(decoded + 0.5 * original_face)
+                
+                return output
         
         self.musetalk_model = SimpleMuseTalk().to(self.device)
         self.musetalk_model.eval()
@@ -412,6 +437,54 @@ class MuseTalkInference:
         
         return output_bgr
     
+    def simple_lip_sync_fallback(self, face_crop, audio_features, frame_idx):
+        """Simple fallback lip sync when main model fails"""
+        try:
+            # Get audio intensity for this frame
+            if audio_features.size > frame_idx:
+                audio_intensity = float(np.abs(audio_features.flat[frame_idx % audio_features.size]))
+            else:
+                audio_intensity = 0.5
+            
+            # Normalize intensity
+            audio_intensity = np.clip(audio_intensity * 2.0, 0.1, 1.0)
+            
+            # Create simple mouth animation
+            height, width = face_crop.shape[:2]
+            
+            # Define mouth region (lower third of face)
+            mouth_y_start = int(height * 0.6)
+            mouth_y_end = int(height * 0.85)
+            mouth_x_start = int(width * 0.3)
+            mouth_x_end = int(width * 0.7)
+            
+            # Copy original face
+            result = face_crop.copy()
+            
+            # Simple mouth animation - darken mouth area based on audio
+            mouth_region = result[mouth_y_start:mouth_y_end, mouth_x_start:mouth_x_end]
+            
+            # Apply mouth opening effect
+            darkness_factor = 0.3 + (0.4 * audio_intensity)
+            mouth_region = cv2.addWeighted(
+                mouth_region, 
+                1.0 - darkness_factor,
+                np.zeros_like(mouth_region), 
+                darkness_factor, 
+                0
+            )
+            
+            # Add slight blur for more natural look
+            mouth_region = cv2.GaussianBlur(mouth_region, (3, 3), 1)
+            
+            result[mouth_y_start:mouth_y_end, mouth_x_start:mouth_x_end] = mouth_region
+            
+            return result
+            
+        except Exception as e:
+            print(f"Fallback lip sync error: {e}")
+            return face_crop
+    
     def sync_durations(self, video_path, audio_path, target_video, target_audio):
         """Sync video and audio durations"""
         # Get video info
@@ -502,7 +575,22 @@ class MuseTalkInference:
                     # Run model inference
                     with torch.no_grad():
                         generated_face = self.musetalk_model(audio_feat, face_tensor)
+                        
+                        # Debug: Check model output
+                        print(f"Model output range: [{generated_face.min():.3f}, {generated_face.max():.3f}]")
+                        
+                        # Ensure output is in valid range
+                        generated_face = torch.clamp(generated_face, 0, 1)
                         processed_face = self.postprocess_output(generated_face, original_face_size)
+                        
+                        # Debug: Check processed face
+                        print(f"Processed face shape: {processed_face.shape}, range: [{processed_face.min()}, {processed_face.max()}]")
+                        
+                        # Fallback: If model output looks wrong, use simple lip sync
+                        if processed_face.mean() < 10 or processed_face.std() < 5:
+                            print("⚠️ Model output appears invalid, using simple fallback lip sync")
+                            processed_face = self.simple_lip_sync_fallback(face_crop, audio_feat.cpu().numpy(), frame_idx)
+                            processed_face = cv2.resize(processed_face, original_face_size)
                     
                     # Replace face in original frame
                     result_frame = frame.copy()
