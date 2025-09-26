@@ -49,7 +49,7 @@ RUN ln -s /usr/bin/python3 /usr/bin/python
 WORKDIR /app
 
 # Copy requirements first (for better Docker caching)
-COPY requirements.txt .
+#COPY requirements.txt .
 
 # Upgrade pip and install wheel
 RUN pip3 install --no-cache-dir --upgrade pip setuptools wheel
