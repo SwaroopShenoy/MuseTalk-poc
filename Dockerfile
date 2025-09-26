@@ -66,7 +66,7 @@ USER musetalk
 EXPOSE 5000
 
 # Health check
-HEALTHCHECK --interval=300s --timeout=15s --start-period=180s --retries=3 \
+HEALTHCHECK --interval=1200s --timeout=15s --start-period=180s --retries=3 \
     CMD curl -f http://localhost:5000/health || exit 1
 
 # Run the application
