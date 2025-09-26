@@ -30,7 +30,13 @@ def get_optimal_batch_size():
     """Calculate optimal batch size based on available GPU/CPU memory"""
     if torch.cuda.is_available():
         gpu_memory = torch.cuda.get_device_properties(0).total_memory
-        return max(1, min(4, int(gpu_memory * 0.3 / (512 * 1024 * 1024))))
+        # RTX 3090 has 24GB VRAM - optimize for this
+        if gpu_memory > 20 * 1024 * 1024 * 1024:  # 20GB+
+            return 6  # Aggressive batching for RTX 3090
+        elif gpu_memory > 16 * 1024 * 1024 * 1024:  # 16GB+
+            return 4
+        else:
+            return max(1, min(4, int(gpu_memory * 0.3 / (512 * 1024 * 1024))))
     else:
         available_memory = psutil.virtual_memory().available
         return max(1, min(2, int(available_memory * 0.3 / (400 * 1024 * 1024))))

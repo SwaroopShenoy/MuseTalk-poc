@@ -1,10 +1,11 @@
-# Use NVIDIA CUDA base image for GPU support
-FROM nvidia/cuda:12.6.0-runtime-ubuntu22.04
+# Use NVIDIA CUDA base image compatible with CUDA 12.9
+FROM nvidia/cuda:12.6.2-runtime-ubuntu22.04
 
 # Set environment variables
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONUNBUFFERED=1
 ENV TORCH_CUDA_ARCH_LIST="6.0 6.1 7.0 7.5 8.0 8.6+PTX"
+ENV CUDA_TOOLKIT_ROOT_DIR=/usr/local/cuda
 ENV TORCH_HOME=/app/checkpoints/torch_cache
 ENV HF_HOME=/app/checkpoints/huggingface_cache
 
@@ -43,27 +44,26 @@ COPY requirements.txt .
 # Upgrade pip and install wheel
 RUN pip3 install --no-cache-dir --upgrade pip setuptools wheel
 
-# Install PyTorch with CUDA 12.6 support first (specific versions to avoid conflicts)
+# Install PyTorch with CUDA 12.1 support (best compatibility for CUDA 12.9)
 RUN pip3 install --no-cache-dir \
-    torch==2.7.1 \
-    torchvision==0.22.1 \
-    torchaudio==2.7.1 \
-    --index-url https://download.pytorch.org/whl/cu126
+    torch==2.4.1 \
+    torchvision==0.19.1 \
+    torchaudio==2.4.1 \
+    --index-url https://download.pytorch.org/whl/cu121
 
-# Install xformers (for efficient attention)
-RUN pip3 install --no-cache-dir \
-    xformers==0.0.30 \
-    --index-url https://download.pytorch.org/whl/cu126
+# Install xformers (for efficient attention) - compatible version
+RUN pip3 install --no-cache-dir xformers==0.0.28
 
 # Install other Python dependencies (excluding torch variants already installed)
 RUN pip3 install --no-cache-dir -r requirements.txt \
-    --find-links https://download.pytorch.org/whl/cu126
+    --find-links https://download.pytorch.org/whl/cu121
 
 # Install additional MuseTalk specific packages
 RUN pip3 install --no-cache-dir \
     git+https://github.com/openai/whisper.git \
     face-alignment \
-    mediapipe
+    mediapipe \
+    einops
 
 # Create necessary directories
 RUN mkdir -p /app/checkpoints /app/output /app/input \

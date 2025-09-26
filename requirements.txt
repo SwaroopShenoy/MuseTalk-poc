@@ -17,7 +17,7 @@ omegaconf>=2.3.0
 # Audio processing
 librosa>=0.10.0
 soundfile>=0.12.0
-whisper-openai>=20231117
+# openai-whisper installed from git in Dockerfile
 resampy>=0.4.0
 
 # Computer vision

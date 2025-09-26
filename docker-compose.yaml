@@ -19,6 +19,7 @@ services:
       - TORCH_HOME=/app/checkpoints/torch_cache
       - HF_HOME=/app/checkpoints/huggingface_cache
       - CUDA_VISIBLE_DEVICES=0
+      - PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:512
     deploy:
       resources:
         reservations:
@@ -27,15 +28,15 @@ services:
               count: all
               capabilities: [gpu, compute, utility]
         limits:
-          memory: 24G  # Increased for MuseTalk
-          cpus: '8'
+          memory: 12G  # Increased for MuseTalk
+          cpus: '4'
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
       interval: 300s
       timeout: 30s
       retries: 3
-      start_period: 600s  # Increased startup time for model downloads
+      start_period: 300s  # Increased startup time for model downloads
     logging:
       driver: "json-file"
       options:
