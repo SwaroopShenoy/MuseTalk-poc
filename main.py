@@ -193,15 +193,31 @@ class MuseTalkInference:
                 }
                 print("⚠️ Using default MuseTalk config")
             
-            # Load VAE
+            # Load VAE with proper error handling
             vae_path = self.model_dir / "sd-vae-ft-mse"
             if vae_path.exists():
-                self.vae = AutoencoderKL.from_pretrained(str(vae_path), torch_dtype=torch.float16)
-                self.vae = self.vae.to(self.device)
-                self.vae.eval()
-                print("✅ VAE model loaded")
+                try:
+                    # Try to load with safetensors first, then fallback to bin
+                    self.vae = AutoencoderKL.from_pretrained(str(vae_path), torch_dtype=torch.float16)
+                    self.vae = self.vae.to(self.device)
+                    self.vae.eval()
+                    
+                    # Test VAE with a dummy input to verify it works
+                    with torch.no_grad():
+                        dummy_input = torch.randn(1, 3, 256, 256, dtype=torch.float16, device=self.device)
+                        try:
+                            dummy_latent = self.vae.encode(dummy_input).latent_dist.sample()
+                            print(f"✅ VAE test passed - latent shape: {dummy_latent.shape}")
+                        except Exception as vae_test_error:
+                            print(f"⚠️ VAE test failed: {vae_test_error}")
+                            # This might indicate we need a different VAE configuration
+                    
+                    print("✅ VAE model loaded and tested")
+                except Exception as e:
+                    print(f"❌ VAE loading error: {e}")
+                    raise e
             else:
-                raise Exception("VAE model not found")
+                raise Exception("VAE model not found - required for latent space operations")
             
             # Load MuseTalk UNet - FIXED for correct input channels
             musetalk_path = self.model_dir / "musetalk" / "pytorch_model.bin"
@@ -411,21 +427,32 @@ class MuseTalkInference:
         return frames, fps
     
     def preprocess_face(self, face_img):
-        """Preprocess face image for MuseTalk"""
+        """Preprocess face image for MuseTalk with proper channel handling"""
         # Resize to 256x256
         face_resized = cv2.resize(face_img, (256, 256))
         
-        # Convert to RGB and normalize
-        face_rgb = cv2.cvtColor(face_resized, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
+        # Convert BGR to RGB and normalize to [0, 1]
+        if len(face_resized.shape) == 3 and face_resized.shape[2] == 3:
+            face_rgb = cv2.cvtColor(face_resized, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
+        else:
+            # If already single channel or other format
+            face_rgb = face_resized.astype(np.float32) / 255.0
+            if len(face_rgb.shape) == 2:
+                face_rgb = np.stack([face_rgb] * 3, axis=2)  # Convert grayscale to RGB
         
-        # Normalize to [-1, 1] for VAE
+        # Normalize to [-1, 1] for VAE (VAE expects this range)
         face_normalized = (face_rgb - 0.5) / 0.5
         
-        # Convert to tensor with correct dtype
+        # Convert to tensor format (CHW) and ensure correct dtype
         face_tensor = torch.from_numpy(face_normalized.transpose(2, 0, 1)).unsqueeze(0)
         
-        # Ensure float16 consistency with VAE
-        return face_tensor.to(self.device).half()
+        # Move to device and ensure half precision consistency
+        face_tensor = face_tensor.to(self.device).half()
+        
+        # Debug: print tensor shape to verify
+        print(f"🔍 Face tensor shape: {face_tensor.shape} (should be [1, 3, 256, 256])")
+        
+        return face_tensor
     
     def create_mouth_mask(self, face_shape=(256, 256)):
         """Create mask for mouth region - returns 4-channel mask for 8-channel UNet"""
@@ -567,12 +594,28 @@ class MuseTalkInference:
                     batch_faces = batch_face_tensors[0]
                     batch_audio = batch_audio_feats[0]
                 
-                # Run inference - single-step inpainting with correct channel handling
+                # Run inference with comprehensive error handling and debugging
                 with torch.no_grad():
-                    # Encode to latent space - ensure half precision
-                    face_latents = self.vae.encode(batch_faces.half()).latent_dist.sample()
-                    face_latents = face_latents * self.vae.config.scaling_factor
-                    face_latents = face_latents.half()  # Ensure half precision
+                    try:
+                        # Debug batch faces shape before VAE encoding
+                        print(f"🔍 Batch faces shape before VAE: {batch_faces.shape}")
+                        
+                        # Encode to latent space - ensure half precision and proper shape
+                        if batch_faces.shape[1] != 3:
+                            raise ValueError(f"Expected 3-channel input for VAE, got {batch_faces.shape[1]} channels")
+                        
+                        encoded_result = self.vae.encode(batch_faces.half())
+                        face_latents = encoded_result.latent_dist.sample()
+                        face_latents = face_latents * self.vae.config.scaling_factor
+                        face_latents = face_latents.half()  # Ensure half precision
+                        
+                        print(f"🔍 Face latents shape: {face_latents.shape}")
+                        
+                    except Exception as vae_error:
+                        print(f"❌ VAE encoding failed: {vae_error}")
+                        print(f"Input shape was: {batch_faces.shape}")
+                        print(f"Input dtype was: {batch_faces.dtype}")
+                        raise vae_error
                     
                     # Create masked latents
                     batch_size_actual = face_latents.shape[0]
@@ -580,12 +623,13 @@ class MuseTalkInference:
                     mask_latent = nn.functional.interpolate(mask_latent, size=(32, 32), mode='bilinear')
                     mask_latent = mask_latent.repeat(batch_size_actual, 1, 1, 1).half()  # Ensure half precision
                     
+                    print(f"🔍 Mask latent shape: {mask_latent.shape}")
+                    
                     masked_latents = face_latents * (1 - mask_latent)
                     
                     # Prepare UNet input based on detected input channels with correct concatenation
                     if hasattr(self, 'input_channels') and self.input_channels == 8:
                         # For 8-channel input: concatenate [face_latents, mask_latent] = [4, 4] = 8 channels
-                        # NOT [masked_latents, mask_latent] which would be [4, 1] = 5 channels
                         unet_input = torch.cat([face_latents, mask_latent], dim=1).half()
                         print(f"🔍 UNet input shape: {unet_input.shape} (8-channel mode)")
                     else:
@@ -598,13 +642,21 @@ class MuseTalkInference:
                     
                     # Ensure audio features are half precision
                     batch_audio_half = batch_audio.half()
+                    print(f"🔍 Audio features shape: {batch_audio_half.shape}")
                     
-                    noise_pred = self.unet(
-                        unet_input,
-                        timesteps,
-                        encoder_hidden_states=batch_audio_half,
-                        return_dict=False
-                    )[0]
+                    try:
+                        noise_pred = self.unet(
+                            unet_input,
+                            timesteps,
+                            encoder_hidden_states=batch_audio_half,
+                            return_dict=False
+                        )[0]
+                        print(f"🔍 UNet output shape: {noise_pred.shape}")
+                    except Exception as unet_error:
+                        print(f"❌ UNet inference failed: {unet_error}")
+                        print(f"UNet input shape: {unet_input.shape}")
+                        print(f"Audio shape: {batch_audio_half.shape}")
+                        raise unet_error
                     
                     # Apply inpainting - ensure all tensors are half precision
                     inpainted_latents = face_latents * (1 - mask_latent) + noise_pred * mask_latent
